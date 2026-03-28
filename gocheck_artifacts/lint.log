@@ -1,3 +1,0 @@
-internal/graph/graph.go:124:26: S1025: the argument is already a string, there's no need to use fmt.Sprintf (gosimple)
-			lines = append(lines, fmt.Sprintf("%s", name))
-			                      ^

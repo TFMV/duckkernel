@@ -2,8 +2,6 @@ package validation
 
 import "sort"
 
-type adjacency map[string]map[string]struct{}
-
 func DetectCycle(edges map[string]map[string]struct{}, from, to string) (bool, []string) {
 	if from == to {
 		return true, []string{from, to}

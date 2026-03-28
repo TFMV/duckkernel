@@ -330,9 +330,71 @@ func (d *dagStore) RenderASCII() string {
 			lines = append(lines, id)
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("%s <- %s", id, strings.Join(deps, ", ")))
+		lines = append(lines, fmt.Sprintf("%s → %s", id, strings.Join(deps, ", ")))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (d *dagStore) RenderASCIITree() string {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	if len(d.nodes) == 0 {
+		return "(empty graph)"
+	}
+
+	roots := make([]string, 0)
+	children := make(map[string][]string)
+
+	for id := range d.nodes {
+		latest := d.nodes[id].Latest()
+		deps := []string{}
+		if latest != nil {
+			deps = latest.Dependencies
+		}
+		if len(deps) == 0 {
+			roots = append(roots, id)
+		}
+		for _, dep := range deps {
+			children[dep] = append(children[dep], id)
+		}
+	}
+
+	sort.Strings(roots)
+
+	var render func(node string, prefix string, isLast bool) []string
+	render = func(node string, prefix string, isLast bool) []string {
+		var lines []string
+		connector := "└── "
+		if !isLast {
+			connector = "├── "
+		}
+		lines = append(lines, prefix+connector+node)
+
+		kids := children[node]
+		sort.Strings(kids)
+
+		var newPrefix string
+		if !isLast {
+			newPrefix = prefix + "│   "
+		} else {
+			newPrefix = prefix + "    "
+		}
+
+		for i, kid := range kids {
+			isLastKid := i == len(kids)-1
+			lines = append(lines, render(kid, newPrefix, isLastKid)...)
+		}
+		return lines
+	}
+
+	var allLines []string
+	for i, root := range roots {
+		isLastRoot := i == len(roots)-1
+		allLines = append(allLines, render(root, "", isLastRoot)...)
+	}
+
+	return strings.Join(allLines, "\n")
 }
 
 func (d *dagStore) validateDependencies(deps []string) error {
