@@ -1,270 +1,126 @@
-# duckkernel
-Stateful Compute Kernel
+# DuckKernel
 
-It turns DuckDB from “query engine” into **a runtime environment**.
+A stateful compute kernel that transforms DuckDB from a query engine into a runtime environment.
 
----
+## The Problem
 
-# 🧠 The idea
+DuckDB is a brilliant execution engine, but it's stateless—each query starts fresh. DuckKernel adds:
 
-> A persistent, interactive, stateful data execution kernel where datasets, queries, and transformations live as first-class objects.
+- **Named datasets** that persist across sessions
+- **Computation graph** tracking dependencies and lineage  
+- **Incremental recomputation** — only recompute what changed
+- **Interactive REPL** for exploratory data work
 
-Think:
+## Installation
 
-* SQLite shell → too limited
-* Jupyter → too Python-centric
-* Spark session → too heavy
-* DuckDB → too stateless
-
-duckkernel carves out the middle:
-
-> a **data VM with memory, named relations, and execution history**
-
----
-
-# ⚙️ Core mental model
-
-Instead of:
-
-```sql
-SELECT ...
+```bash
+go build -o duckkernel ./cmd/duckkernel
 ```
 
-You get:
+## Quick Start
 
-```
-DATASETS (stateful objects in memory)
-   ↓
-TRANSFORMS (operators over datasets)
-   ↓
-DERIVED DATASETS (persisted or cached)
-   ↓
-QUERY HISTORY (replayable computation graph)
-```
+```bash
+# Start the REPL
+./duckkernel repl
 
----
-
-# 🧱 Architecture
-
-## 1. Kernel process (Go)
-
-A long-running daemon:
-
-```
-duckkernel
+# Or run one-shot commands
+./duckkernel create users "SELECT 1 as id, 'Alice' as name UNION ALL SELECT 2, 'Bob'"
+./duckkernel query "SELECT * FROM users"
+./duckkernel graph
 ```
 
-Responsibilities:
+## CLI Commands
 
-* holds DuckDB connection open
-* maintains dataset registry
-* caches relations
-* tracks execution graph
-* exposes CLI + socket API
+| Command | Description |
+|---------|-------------|
+| `create <name> "<sql>"` | Create a named dataset |
+| `transform <name> "<sql>"` | Create or update a derived dataset |
+| `show <name>` | Show dataset metadata |
+| `drop <name>` | Drop a dataset |
+| `list` | List all datasets |
+| `graph` | Print the dataset lineage graph |
+| `run <name>` | Execute and display results |
+| `recompute <name>` | Recompute a dataset |
+| `preview <name>` | Stream preview of dataset |
+| `query "<sql>"` | Execute raw SQL |
+| `explain <name>` | Explain dataset and plan |
+| `repl` | Start interactive REPL |
 
----
+### Options
 
-## 2. Dataset registry (the core abstraction)
+- `--debug` — Enable debug output
+- `--db <path>` — Database file path (default: `duckkernel.db`)
+- `--format <table|json|markdown>` — Output format
 
-Everything becomes a named object:
+## REPL Mode
+
+```bash
+./duckkernel repl
+```
+
+Supports:
+
+- **Named assignments**: `users = SELECT * FROM read_csv('users.csv')`
+- **Direct queries**: `SELECT * FROM users WHERE active = true`
+- **Multi-line SQL**: CTEs, UNIONs, etc.
+- **Commands**: `\help`, `\list`, `\graph`, `\clear`, `\quit`
+
+## Architecture
+
+```
+/internal
+├── execution/
+│   ├── duckdb/     # DuckDB adapter with context support
+│   ├── runtime/    # Execution engine
+│   ├── stream/     # Streaming results
+│   └── materialize/ # Materialization modes
+├── cli/            # CLI commands
+├── repl/           # Interactive REPL
+├── kernel/         # Kernel orchestrator
+├── dataset/        # Dataset registry
+└── graph/          # DAG tracking
+```
+
+## Materialization Modes
+
+Each dataset has a materialization mode:
+
+- **ephemeral** — temp table only, dropped after session
+- **cached** — persisted in DuckDB, reused on subsequent runs
+- **persistent** — durable table or exported to file
+
+## Execution Runtime
+
+The runtime executes transformation plans respecting dependency order:
 
 ```go
-type Dataset struct {
-    Name      string
-    SQL       string
-    Cached    bool
-    CreatedAt time.Time
+plan := runtime.ExecutionPlan{
+    Nodes: []runtime.PlanNode{
+        {NodeID: "users", SQL: "...", Action: runtime.ActionCompute},
+        {NodeID: "active", SQL: "SELECT * FROM dk_users WHERE active", Action: runtime.ActionCompute},
+        {NodeID: "enriched", SQL: "...", Action: runtime.ActionMaterialize},
+    },
 }
+result, _ := runtime.ExecutePlan(ctx, plan)
 ```
 
-Examples:
+Features:
+- Sequential execution (required for correctness)
+- Failure halts downstream nodes
+- Streaming support for large datasets
+- Cache integration
 
-```
-users
-active_users
-orders_2024
-joined_view_1
-```
+## Why DuckKernel?
 
----
+| Tool | Limitation |
+|------|-----------|
+| SQLite shell | Too limited |
+| Jupyter | Python-centric |
+| Spark | Too heavy |
+| DuckDB | Stateless |
 
-## 3. Execution engine (DuckDB-backed)
+DuckKernel: **data VM with memory, named relations, and execution history**
 
-Every operation compiles to:
+## License
 
-```sql
-CREATE TABLE <name> AS ...
-```
-
-But wrapped with:
-
-* dependency tracking
-* caching rules
-* lineage metadata
-
----
-
-## 4. Query graph
-
-```go
-type Node struct {
-    ID       string
-    SQL      string
-    Inputs   []string
-    Outputs  []string
-}
-```
-
-This becomes:
-
-> a **replayable computation DAG**
-
-Not just history logs.
-
----
-
-# 🧪 CLI design
-
-## Create dataset
-
-```bash
-duckkernel create users "SELECT * FROM read_csv('users.csv')"
-```
-
-## Transform
-
-```bash
-duckkernel transform active_users \
-  "SELECT * FROM users WHERE active = true"
-```
-
-## Join
-
-```bash
-duckkernel transform enriched \
-  "SELECT * FROM active_users JOIN orders USING (user_id)"
-```
-
-## Inspect graph
-
-```bash
-duckkernel graph
-```
-
-Outputs:
-
-```
-users ─┬─> active_users ─┬─> enriched
-       │                 │
-       └─────────────────┘
-```
-
----
-
-# 🧠 What makes this *not just another SQL shell*
-
-This is critical:
-
-## duckkernel is not
-
-* a query runner
-* a SQL wrapper
-* a DuckDB CLI
-
-## duckkernel is
-
-> a **persistent relational execution environment**
-
-That means:
-
-### 1. State exists beyond queries
-
-Datasets persist as logical entities
-
-### 2. Computation is named
-
-Not anonymous SQL strings
-
-### 3. Execution is traceable
-
-Everything forms a graph
-
-### 4. Reuse is native
-
-No recomputing everything every time
-
----
-
-# 🔥 The killer feature
-
-## “Recompute only what changed”
-
-Because duckkernel tracks DAG nodes, you can do:
-
-* incremental updates
-* cached subgraph reuse
-* partial invalidation
-
-Example:
-
-```
-users → active_users → enriched
-```
-
-If `users` changes:
-
-* only downstream nodes recompute
-
-This is Spark-lite semantics without Spark.
-
----
-
-# 🧬 Future Work
-
-Once duckkernel is working!
-
-## 1. Materialization modes
-
-```bash
-duckkernel materialize active_users
-```
-
-* in-memory
-* disk-backed
-* ephemeral
-
----
-
-## 2. Time travel
-
-Every dataset node becomes versioned:
-
-```
-active_users@v3
-active_users@v4
-```
-
----
-
-## 3. Execution replay
-
-```bash
-duckkernel replay enriched
-```
-
-Rebuild entire DAG deterministically.
-
----
-
-# 🧭 The philosophical core
-
-DuckDB today is:
-
-> a brilliant execution engine without memory
-
-duckernel becomes:
-
-> memory + execution + structure + history
-
-That’s the missing layer.
-
+MIT

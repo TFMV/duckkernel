@@ -180,7 +180,9 @@ func (k *Kernel) Drop(name string) error {
 	if err := k.registry.Remove(name); err != nil {
 		return err
 	}
-	k.graph.RemoveNode(name)
+	if err := k.graph.RemoveNode(name); err != nil {
+		return err
+	}
 	if err := k.exec.DropRelation(name); err != nil {
 		return err
 	}
