@@ -17,8 +17,10 @@ import (
 )
 
 type RecomputeResult struct {
-	Recomputed []string
-	Skipped    []string
+	Requested                 []string
+	Recomputed                []string
+	RecomputedDueToDependency []string
+	Skipped                   []string
 }
 
 type Kernel struct {
@@ -252,68 +254,54 @@ func (k *Kernel) recomputeInternal(name string) (*RecomputeResult, error) {
 		return nil, fmt.Errorf("failed to build recompute plan: %w", err)
 	}
 
-	recomputed := []string{}
-	skipped := []string{}
-
-	for _, nodeID := range plan {
-		ds, err := k.registry.Get(nodeID)
-		if err != nil {
-			continue
-		}
-
-		needsRecompute := false
-
-		if nodeID == name || !ds.CurrentVersion.CacheValid {
-			needsRecompute = true
-		} else if len(ds.CurrentVersion.Dependencies) > 0 {
-			for _, dep := range ds.CurrentVersion.Dependencies {
-				depDs, err := k.registry.Get(dep)
-				if err != nil {
-					needsRecompute = true
-					break
-				}
-				lastKnownVersion := ds.CurrentVersion.DependencyVersions[dep]
-				if lastKnownVersion != depDs.CurrentVersion.Version {
-					needsRecompute = true
-					break
-				}
-			}
-		}
-
-		if needsRecompute {
-			recomputed = append(recomputed, nodeID)
-		} else {
-			skipped = append(skipped, nodeID)
-		}
+	result, err := k.executePlan(name, plan, true)
+	if err != nil {
+		return nil, err
 	}
 
-	for _, nodeID := range plan {
+	k.traceEvent("recompute", name, fmt.Sprintf("affected=%d", len(plan)))
+	return result, nil
+}
+
+func (k *Kernel) PlanRun(name string) (*RecomputeResult, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+
+	plan, err := k.buildRunPlan(name)
+	if err != nil {
+		return nil, err
+	}
+	return k.classifyPlan(name, plan, false)
+}
+
+func (k *Kernel) buildRunPlan(root string) ([]string, error) {
+	if _, err := k.registry.Get(root); err != nil {
+		return nil, err
+	}
+	if _, err := k.graph.GetNode(root); err != nil {
+		return nil, fmt.Errorf("dataset not registered: %s", root)
+	}
+
+	planSet := map[string]struct{}{root: {}}
+	k.collectUpstream(root, planSet)
+
+	ids := make([]string, 0, len(planSet))
+	for id := range planSet {
+		ids = append(ids, id)
+	}
+	return traversal.TopologicalSort(ids, k.getEdges())
+}
+
+func (k *Kernel) executePlan(root string, plan []string, forceRoot bool) (*RecomputeResult, error) {
+	result, err := k.classifyPlan(root, plan, forceRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, nodeID := range append(append([]string{}, result.Requested...), result.RecomputedDueToDependency...) {
 		ds, err := k.registry.Get(nodeID)
 		if err != nil {
 			return nil, err
-		}
-
-		needsRecompute := false
-
-		if nodeID == name || !ds.CurrentVersion.CacheValid {
-			needsRecompute = true
-		} else if len(ds.CurrentVersion.Dependencies) > 0 {
-			for _, dep := range ds.CurrentVersion.Dependencies {
-				depDs, err := k.registry.Get(dep)
-				if err != nil {
-					needsRecompute = true
-					break
-				}
-				lastKnownVersion := ds.CurrentVersion.DependencyVersions[dep]
-				if lastKnownVersion != depDs.CurrentVersion.Version {
-					needsRecompute = true
-					break
-				}
-			}
-		}
-
-		if !needsRecompute {
-			continue
 		}
 
 		if err := k.executeDataset(ds); err != nil {
@@ -341,8 +329,59 @@ func (k *Kernel) recomputeInternal(name string) (*RecomputeResult, error) {
 		k.cache.MarkValid(nodeID)
 	}
 
-	k.traceEvent("recompute", name, fmt.Sprintf("affected=%d", len(plan)))
-	return &RecomputeResult{Recomputed: recomputed, Skipped: skipped}, nil
+	return result, nil
+}
+
+func (k *Kernel) classifyPlan(root string, plan []string, forceRoot bool) (*RecomputeResult, error) {
+	result := &RecomputeResult{}
+	for _, nodeID := range plan {
+		ds, err := k.registry.Get(nodeID)
+		if err != nil {
+			return nil, err
+		}
+
+		reason, err := k.recomputeReason(nodeID, root, ds, forceRoot)
+		if err != nil {
+			return nil, err
+		}
+
+		switch reason {
+		case "requested":
+			result.Requested = append(result.Requested, nodeID)
+		case "dependency":
+			result.RecomputedDueToDependency = append(result.RecomputedDueToDependency, nodeID)
+		default:
+			result.Skipped = append(result.Skipped, nodeID)
+		}
+	}
+	result.Recomputed = append(append([]string{}, result.Requested...), result.RecomputedDueToDependency...)
+	return result, nil
+}
+
+func (k *Kernel) recomputeReason(nodeID, root string, ds *dataset.Dataset, forceRoot bool) (string, error) {
+	if nodeID == root && forceRoot {
+		return "requested", nil
+	}
+	if !ds.CurrentVersion.CacheValid {
+		if nodeID == root {
+			return "requested", nil
+		}
+		return "dependency", nil
+	}
+	for _, dep := range ds.CurrentVersion.Dependencies {
+		depDs, err := k.registry.Get(dep)
+		if err != nil {
+			return "dependency", nil
+		}
+		lastKnownVersion := ds.CurrentVersion.DependencyVersions[dep]
+		if lastKnownVersion != depDs.CurrentVersion.Version {
+			if nodeID == root {
+				return "requested", nil
+			}
+			return "dependency", nil
+		}
+	}
+	return "skipped", nil
 }
 
 func (k *Kernel) buildRecomputePlan(root string, affected []string) ([]string, error) {
@@ -423,17 +462,12 @@ func (k *Kernel) EnsureFresh(name string) (*RecomputeResult, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 
-	ds, err := k.registry.Get(name)
+	plan, err := k.buildRunPlan(name)
 	if err != nil {
 		return nil, err
 	}
 
-	if ds.CurrentVersion.CacheValid {
-		return nil, nil
-	}
-
-	k.logger.Printf("dataset %s is dirty, auto-recomputing...", name)
-	return k.recomputeInternal(name)
+	return k.executePlan(name, plan, false)
 }
 
 func (k *Kernel) IsDirty(name string) bool {
