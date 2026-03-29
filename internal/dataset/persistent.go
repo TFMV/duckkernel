@@ -59,6 +59,7 @@ func (r *PersistentRegistry) Load() error {
 		if err := json.Unmarshal([]byte(data), &ds); err != nil {
 			continue
 		}
+		ds.EnsureDependencyVersions()
 		r.datasets[name] = &ds
 	}
 	r.loaded = true

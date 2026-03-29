@@ -161,8 +161,7 @@ func (r *Runtime) executeNode(ctx context.Context, node PlanNode) *NodeResult {
 }
 
 func (r *Runtime) StreamNode(ctx context.Context, nodeID string) (stream.RecordStream, error) {
-	tableName := r.mat.QualifiedTable(nodeID)
-	sqlText := fmt.Sprintf("SELECT * FROM %s", tableName)
+	sqlText := fmt.Sprintf("SELECT * FROM %s", nodeID)
 	return stream.NewDuckStream(ctx, r.db, sqlText)
 }
 

@@ -15,14 +15,15 @@ const (
 )
 
 type DatasetVersion struct {
-	ID           string              `json:"id"`
-	Version      int                 `json:"version"`
-	SQL          string              `json:"sql"`
-	Mode         MaterializationMode `json:"mode"`
-	Dependencies []string            `json:"dependencies"`
-	CreatedAt    time.Time           `json:"created_at"`
-	ExecutedAt   time.Time           `json:"executed_at"`
-	CacheValid   bool                `json:"cache_valid"`
+	ID                 string              `json:"id"`
+	Version            int                 `json:"version"`
+	SQL                string              `json:"sql"`
+	Mode               MaterializationMode `json:"mode"`
+	Dependencies       []string            `json:"dependencies"`
+	DependencyVersions map[string]int      `json:"dependency_versions"`
+	CreatedAt          time.Time           `json:"created_at"`
+	ExecutedAt         time.Time           `json:"executed_at"`
+	CacheValid         bool                `json:"cache_valid"`
 }
 
 type Dataset struct {
@@ -31,6 +32,17 @@ type Dataset struct {
 	Versions       []*DatasetVersion `json:"versions"`
 	CreatedAt      time.Time         `json:"created_at"`
 	UpdatedAt      time.Time         `json:"updated_at"`
+}
+
+func (d *Dataset) EnsureDependencyVersions() {
+	if d.CurrentVersion != nil && d.CurrentVersion.DependencyVersions == nil {
+		d.CurrentVersion.DependencyVersions = make(map[string]int)
+	}
+	for _, v := range d.Versions {
+		if v.DependencyVersions == nil {
+			v.DependencyVersions = make(map[string]int)
+		}
+	}
 }
 
 type Registry interface {
@@ -129,14 +141,15 @@ func ParseMode(raw string) MaterializationMode {
 
 func NewDataset(name, sql string, mode MaterializationMode, deps []string) *Dataset {
 	v := &DatasetVersion{
-		ID:           fmt.Sprintf("%s-v1", name),
-		Version:      1,
-		SQL:          sql,
-		Mode:         mode,
-		Dependencies: deps,
-		CreatedAt:    time.Now().UTC(),
-		ExecutedAt:   time.Time{},
-		CacheValid:   false,
+		ID:                 fmt.Sprintf("%s-v1", name),
+		Version:            1,
+		SQL:                sql,
+		Mode:               mode,
+		Dependencies:       deps,
+		DependencyVersions: make(map[string]int),
+		CreatedAt:          time.Now().UTC(),
+		ExecutedAt:         time.Time{},
+		CacheValid:         false,
 	}
 	now := time.Now().UTC()
 	return &Dataset{
@@ -151,14 +164,15 @@ func NewDataset(name, sql string, mode MaterializationMode, deps []string) *Data
 func (d *Dataset) AddVersion(sql string, mode MaterializationMode, deps []string) *DatasetVersion {
 	next := len(d.Versions) + 1
 	version := &DatasetVersion{
-		ID:           fmt.Sprintf("%s-v%d", d.Name, next),
-		Version:      next,
-		SQL:          sql,
-		Mode:         mode,
-		Dependencies: deps,
-		CreatedAt:    time.Now().UTC(),
-		ExecutedAt:   time.Time{},
-		CacheValid:   false,
+		ID:                 fmt.Sprintf("%s-v%d", d.Name, next),
+		Version:            next,
+		SQL:                sql,
+		Mode:               mode,
+		Dependencies:       deps,
+		DependencyVersions: make(map[string]int),
+		CreatedAt:          time.Now().UTC(),
+		ExecutedAt:         time.Time{},
+		CacheValid:         false,
 	}
 	d.Versions = append(d.Versions, version)
 	d.CurrentVersion = version

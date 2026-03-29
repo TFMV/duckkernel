@@ -2,6 +2,14 @@
 
 A stateful compute kernel that transforms DuckDB from a query engine into a runtime environment.
 
+## Demo
+
+See [demo/demo.md](demo/demo.md) for a complete walkthrough showing:
+- Creating base and derived datasets
+- Dependency tracking with lineage graph
+- Incremental recomputation when upstream data changes
+- Auto-recompute on `run` command
+
 ## The Problem
 
 DuckDB is a brilliant execution engine, but it's stateless—each query starts fresh. DuckKernel adds:
