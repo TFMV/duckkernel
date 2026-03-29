@@ -138,14 +138,7 @@ func Run(args []string) error {
 		if err != nil {
 			return err
 		}
-		if result != nil {
-			if len(result.Recomputed) > 0 {
-				fmt.Printf("recomputed: %s\n", strings.Join(result.Recomputed, ", "))
-			}
-			if len(result.Skipped) > 0 {
-				fmt.Printf("skipping: %s (unchanged)\n", strings.Join(result.Skipped, ", "))
-			}
-		}
+		printRecomputePlan(result)
 		return nil
 
 	case "list":
@@ -365,24 +358,12 @@ func runDataset(dbPath string, logger *log.Logger, debug bool, name string) erro
 	}
 	defer k.Close()
 
-	if _, err := k.EnsureFresh(name); err != nil {
+	result, err := k.EnsureFresh(name)
+	if err != nil {
 		return fmt.Errorf("failed to ensure fresh: %w", err)
 	}
 
-	ds, err := k.Registry().Get(name)
-	if err != nil {
-		return err
-	}
-
-	deps := ds.CurrentVersion.Dependencies
-	if len(deps) > 0 {
-		fmt.Fprintf(os.Stdout, "executing:\n")
-		for _, dep := range deps {
-			fmt.Fprintf(os.Stdout, "  %s\n", dep)
-		}
-		fmt.Fprintf(os.Stdout, "  %s\n", name)
-		fmt.Fprintf(os.Stdout, "\n")
-	}
+	printExecutionPlan(result)
 
 	rt, err := runtime.New(dbPath, logger, debug)
 	if err != nil {
@@ -427,6 +408,37 @@ func runDataset(dbPath string, logger *log.Logger, debug bool, name string) erro
 	tbl.Render()
 	fmt.Fprintf(os.Stdout, "\n(%d rows)\n", rowCount)
 	return nil
+}
+
+func printRecomputePlan(result *kernel.RecomputeResult) {
+	if result == nil {
+		return
+	}
+	fmt.Printf("recompute plan:\n")
+	printPlanGroup("recompute (requested)", result.Requested)
+	printPlanGroup("recomputed due to dependency change", result.RecomputedDueToDependency)
+	printPlanGroup("skipped (cached reuse)", result.Skipped)
+}
+
+func printExecutionPlan(result *kernel.RecomputeResult) {
+	if result == nil {
+		return
+	}
+	fmt.Printf("execution plan:\n")
+	printPlanGroup("executing", result.Recomputed)
+	printPlanGroup("skipping (cached)", result.Skipped)
+	fmt.Printf("\n")
+}
+
+func printPlanGroup(label string, items []string) {
+	fmt.Printf("  %s:\n", label)
+	if len(items) == 0 {
+		fmt.Printf("    - (none)\n")
+		return
+	}
+	for _, item := range items {
+		fmt.Printf("    - %s\n", item)
+	}
 }
 
 func explainDataset(k *kernel.Kernel, name string) error {

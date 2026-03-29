@@ -46,10 +46,8 @@ BIN="$PROJECT_ROOT/bin/duckkernel"
 
 cd "$PROJECT_ROOT"
 
-if [ ! -f "$BIN" ]; then
-    echo "Building duckkernel..."
-    go build -o "$BIN" ./cmd/duckkernel
-fi
+echo "Building duckkernel..."
+go build -o "$BIN" ./cmd/duckkernel
 
 # Cleanup previous demo
 rm -f "$DB_PATH"
@@ -148,7 +146,13 @@ echo ""
 run "$BIN --db $DB_PATH create analytics \"SELECT u.id, u.name, u.active, COUNT(o.order_id) as order_count, COALESCE(SUM(o.amount), 0) as total_spent FROM large_users u LEFT JOIN large_orders o ON u.id = o.user_id GROUP BY u.id, u.name, u.active ORDER BY total_spent DESC\""
 
 echo -e "${YELLOW}▶ View initial analytics:${NC}"
-run "$BIN --db $DB_PATH query \"SELECT * FROM analytics ORDER BY total_spent DESC\""
+run "$BIN --db $DB_PATH query \"SELECT * FROM analytics ORDER BY total_spent DESC LIMIT 10\""
+
+echo -e "${YELLOW}▶ Create analytics_top (downstream of analytics):${NC}"
+run "$BIN --db $DB_PATH transform analytics_top \"SELECT id, name, total_spent FROM analytics ORDER BY total_spent DESC LIMIT 5\""
+
+echo -e "${YELLOW}▶ View analytics_top baseline:${NC}"
+run "$BIN --db $DB_PATH query \"SELECT * FROM analytics_top\""
 
 echo -e "${YELLOW}▶ Updated lineage (analytics now depends on new large_orders):${NC}"
 run "$BIN --db $DB_PATH graph"
@@ -165,24 +169,27 @@ echo -e "${MAGENTA}This is the key insight: you don't rerun everything.${NC}"
 echo -e "${MAGENTA}DuckKernel tracks dependencies and recomputes only what changed.${NC}"
 echo ""
 
-echo -e "${YELLOW}▶ Modify upstream data (give top 5 users a 10x boost):${NC}"
-run "$BIN --db $DB_PATH transform large_orders \"SELECT i as order_id, ((i-1) % 100) + 1 as user_id, CASE WHEN ((i-1) % 100) + 1 <= 5 THEN (i * 10.5 + 5) * 10 ELSE (i * 10.5 + 5) END as amount FROM range(1, 501) t(i)\""
+echo -e "${YELLOW}▶ Modify upstream data (double spend for users 1-5):${NC}"
+run "$BIN --db $DB_PATH transform large_orders \"SELECT i as order_id, ((i-1) % 100) + 1 as user_id, CASE WHEN ((i-1) % 100) + 1 <= 5 THEN (i * 10.5 + 5) * 2 ELSE (i * 10.5 + 5) END as amount FROM range(1, 501) t(i)\""
 
 echo -e "${YELLOW}▶ Query analytics BEFORE recompute (stale data):${NC}"
-run "$BIN --db $DB_PATH query \"SELECT * FROM analytics ORDER BY total_spent DESC\""
+run "$BIN --db $DB_PATH query \"SELECT * FROM analytics ORDER BY total_spent DESC LIMIT 10\""
 
-echo -e "${YELLOW}▶ Recompute downstream dataset (dependency-aware):${NC}"
+echo -e "${YELLOW}▶ Recompute analytics (explicit plan: requested + dependency-triggered + cached):${NC}"
 run "$BIN --db $DB_PATH recompute analytics"
 
 echo -e "${YELLOW}▶ Query analytics AFTER recompute (updated):${NC}"
-run "$BIN --db $DB_PATH query \"SELECT * FROM analytics ORDER BY total_spent DESC\""
+run "$BIN --db $DB_PATH query \"SELECT * FROM analytics ORDER BY total_spent DESC LIMIT 10\""
+
+echo -e "${YELLOW}▶ Query analytics_top AFTER recompute (auto-updated downstream):${NC}"
+run "$BIN --db $DB_PATH query \"SELECT * FROM analytics_top\""
 
 echo ""
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${GREEN}  NOTE:${NC}"
-echo -e "${GREEN}    Only analytics was recomputed.${NC}"
-echo -e "${GREEN}    large_users was reused (unchanged).${NC}"
-echo -e "${GREEN}    large_orders was updated (new version).${NC}"
+echo -e "${GREEN}    Requested recompute target: analytics.${NC}"
+echo -e "${GREEN}    Downstream dependency recompute: analytics_top.${NC}"
+echo -e "${GREEN}    Cached reuse: large_users and large_orders were not re-executed.${NC}"
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 
@@ -223,11 +230,11 @@ echo -e "${BOLD}REPL feels like a persistent working environment:${NC}"
 echo ""
 
 echo -e "${YELLOW}▶ Use REPL to query existing datasets:${NC}"
-run "echo 'SELECT * FROM active_users' | $BIN --db $DB_PATH repl"
+run "echo 'SELECT * FROM analytics_top' | $BIN --db $DB_PATH repl"
 
 echo ""
-echo -e "${YELLOW}▶ REPL as a persistent workspace - run ad-hoc queries:${NC}"
-run "echo 'SELECT COUNT(*) as total_orders, SUM(amount) as total_amount FROM orders;' | $BIN --db $DB_PATH repl"
+echo -e "${YELLOW}▶ Start a brand-new REPL session and keep using the same persisted graph:${NC}"
+run "echo 'SELECT COUNT(*) as top_rows, MIN(total_spent) as floor_spend FROM analytics_top;' | $BIN --db $DB_PATH repl"
 
 # ═════════════════════════════════════════════════════════════
 # 10. ERROR HANDLING
@@ -253,6 +260,9 @@ echo -e "${CYAN}═════════════════════�
 
 echo -e "${YELLOW}▶ Drop a dataset:${NC}"
 run "$BIN --db $DB_PATH drop analytics"
+
+echo -e "${YELLOW}▶ Drop downstream dataset too:${NC}"
+run "$BIN --db $DB_PATH drop analytics_top"
 
 echo -e "${YELLOW}▶ Verify it's gone (list):${NC}"
 run "$BIN --db $DB_PATH list"
