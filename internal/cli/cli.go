@@ -115,13 +115,37 @@ func Run(args []string) error {
 		return nil
 
 	case "recompute":
-		if len(tail) != 2 {
+		if len(tail) < 2 {
 			return errors.New("recompute requires <name>")
 		}
-		if err := k.Recompute(tail[1]); err != nil {
+		force := false
+		if len(tail) >= 2 && tail[1] == "--force" {
+			force = true
+		} else if len(tail) >= 3 && tail[2] == "--force" {
+			force = true
+		}
+		name := tail[1]
+		if force {
+			name = tail[2]
+		}
+		var result *kernel.RecomputeResult
+		var err error
+		if force {
+			result, err = k.ForceRecompute(name)
+		} else {
+			result, err = k.Recompute(name)
+		}
+		if err != nil {
 			return err
 		}
-		fmt.Printf("recomputed=%s\n", tail[1])
+		if result != nil {
+			if len(result.Recomputed) > 0 {
+				fmt.Printf("recomputed: %s\n", strings.Join(result.Recomputed, ", "))
+			}
+			if len(result.Skipped) > 0 {
+				fmt.Printf("skipping: %s (unchanged)\n", strings.Join(result.Skipped, ", "))
+			}
+		}
 		return nil
 
 	case "list":
@@ -335,6 +359,31 @@ func getFormatter(outFormat OutputFormat) format.Formatter {
 }
 
 func runDataset(dbPath string, logger *log.Logger, debug bool, name string) error {
+	k, err := kernel.New(dbPath, logger, debug)
+	if err != nil {
+		return err
+	}
+	defer k.Close()
+
+	if _, err := k.EnsureFresh(name); err != nil {
+		return fmt.Errorf("failed to ensure fresh: %w", err)
+	}
+
+	ds, err := k.Registry().Get(name)
+	if err != nil {
+		return err
+	}
+
+	deps := ds.CurrentVersion.Dependencies
+	if len(deps) > 0 {
+		fmt.Fprintf(os.Stdout, "executing:\n")
+		for _, dep := range deps {
+			fmt.Fprintf(os.Stdout, "  %s\n", dep)
+		}
+		fmt.Fprintf(os.Stdout, "  %s\n", name)
+		fmt.Fprintf(os.Stdout, "\n")
+	}
+
 	rt, err := runtime.New(dbPath, logger, debug)
 	if err != nil {
 		return err

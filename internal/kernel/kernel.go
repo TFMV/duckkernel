@@ -12,8 +12,14 @@ import (
 	"github.com/TFMV/duckkernel/internal/executor"
 	"github.com/TFMV/duckkernel/internal/graph/dag"
 	"github.com/TFMV/duckkernel/internal/graph/node"
+	"github.com/TFMV/duckkernel/internal/graph/traversal"
 	sqllib "github.com/TFMV/duckkernel/internal/sql"
 )
+
+type RecomputeResult struct {
+	Recomputed []string
+	Skipped    []string
+}
 
 type Kernel struct {
 	exec     executor.Executor
@@ -99,6 +105,10 @@ func (k *Kernel) CreateOrUpdate(name, sqlText string, mode dataset.Materializati
 		return nil, err
 	}
 
+	if err := k.registry.Update(ds); err != nil {
+		return nil, err
+	}
+
 	if _, err := k.registry.Get(name); err != nil {
 		return nil, err
 	}
@@ -109,7 +119,7 @@ func (k *Kernel) CreateOrUpdate(name, sqlText string, mode dataset.Materializati
 		}
 	}
 	k.cache.MarkValid(name)
-	k.cache.InvalidateDownstream(k.graph, name)
+	k.invalidateDownstream(name)
 	k.traceEvent("dataset_update", name, ds.CurrentVersion.SQL)
 	return ds, nil
 }
@@ -140,6 +150,19 @@ func (k *Kernel) executeDataset(ds *dataset.Dataset) error {
 
 	ds.CurrentVersion.ExecutedAt = time.Now().UTC()
 	ds.CurrentVersion.CacheValid = true
+
+	if len(ds.CurrentVersion.Dependencies) > 0 {
+		if ds.CurrentVersion.DependencyVersions == nil {
+			ds.CurrentVersion.DependencyVersions = make(map[string]int)
+		}
+		for _, dep := range ds.CurrentVersion.Dependencies {
+			depDs, err := k.registry.Get(dep)
+			if err == nil {
+				ds.CurrentVersion.DependencyVersions[dep] = depDs.CurrentVersion.Version
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -169,35 +192,214 @@ func (k *Kernel) List() []*dataset.Dataset {
 	return k.registry.List()
 }
 
+func (k *Kernel) Registry() dataset.Registry {
+	return k.registry
+}
+
 func (k *Kernel) Graph() string {
 	return k.graph.RenderASCII()
 }
 
-func (k *Kernel) Recompute(name string) error {
+func (k *Kernel) Recompute(name string) (*RecomputeResult, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	ds, err := k.registry.Get(name)
-	if err != nil {
-		return err
+
+	if _, err := k.registry.Get(name); err != nil {
+		return nil, err
 	}
 	if _, err := k.graph.GetNode(name); err != nil {
-		return fmt.Errorf("dataset not registered: %s", name)
+		return nil, fmt.Errorf("dataset not registered: %s", name)
 	}
-	deps := sqllib.ExtractDependencies(ds.CurrentVersion.SQL, k.registry.Names())
-	ds.AddVersion(ds.CurrentVersion.SQL, ds.CurrentVersion.Mode, deps)
+
+	return k.recomputeInternal(name)
+}
+
+func (k *Kernel) ForceRecompute(name string) (*RecomputeResult, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+
+	ds, err := k.registry.Get(name)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := k.graph.GetNode(name); err != nil {
+		return nil, fmt.Errorf("dataset not registered: %s", name)
+	}
+
+	k.logger.Printf("force recompute: marking %s and all dependents as dirty", name)
+
+	ds.CurrentVersion.CacheValid = false
 	if err := k.registry.Update(ds); err != nil {
-		return err
+		return nil, err
 	}
-	if err := k.executeDataset(ds); err != nil {
-		return err
+	k.graph.Invalidate(name)
+	k.cache.Invalidate(name)
+
+	return k.recomputeInternal(name)
+}
+
+func (k *Kernel) recomputeInternal(name string) (*RecomputeResult, error) {
+	downstream := k.graph.GetDownstream(name)
+	affected := []string{name}
+
+	for _, n := range downstream {
+		affected = append(affected, n.ID)
+		k.cache.Invalidate(n.ID)
 	}
-	if err := k.graph.UpdateNode(k.makeGraphNode(ds)); err != nil {
-		return err
+
+	plan, err := k.buildRecomputePlan(name, affected)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build recompute plan: %w", err)
 	}
-	k.cache.MarkValid(name)
-	k.cache.InvalidateDownstream(k.graph, name)
-	k.traceEvent("recompute", name, ds.CurrentVersion.SQL)
-	return nil
+
+	recomputed := []string{}
+	skipped := []string{}
+
+	for _, nodeID := range plan {
+		ds, err := k.registry.Get(nodeID)
+		if err != nil {
+			continue
+		}
+
+		needsRecompute := false
+
+		if nodeID == name || !ds.CurrentVersion.CacheValid {
+			needsRecompute = true
+		} else if len(ds.CurrentVersion.Dependencies) > 0 {
+			for _, dep := range ds.CurrentVersion.Dependencies {
+				depDs, err := k.registry.Get(dep)
+				if err != nil {
+					needsRecompute = true
+					break
+				}
+				lastKnownVersion := ds.CurrentVersion.DependencyVersions[dep]
+				if lastKnownVersion != depDs.CurrentVersion.Version {
+					needsRecompute = true
+					break
+				}
+			}
+		}
+
+		if needsRecompute {
+			recomputed = append(recomputed, nodeID)
+		} else {
+			skipped = append(skipped, nodeID)
+		}
+	}
+
+	for _, nodeID := range plan {
+		ds, err := k.registry.Get(nodeID)
+		if err != nil {
+			return nil, err
+		}
+
+		needsRecompute := false
+
+		if nodeID == name || !ds.CurrentVersion.CacheValid {
+			needsRecompute = true
+		} else if len(ds.CurrentVersion.Dependencies) > 0 {
+			for _, dep := range ds.CurrentVersion.Dependencies {
+				depDs, err := k.registry.Get(dep)
+				if err != nil {
+					needsRecompute = true
+					break
+				}
+				lastKnownVersion := ds.CurrentVersion.DependencyVersions[dep]
+				if lastKnownVersion != depDs.CurrentVersion.Version {
+					needsRecompute = true
+					break
+				}
+			}
+		}
+
+		if !needsRecompute {
+			continue
+		}
+
+		if err := k.executeDataset(ds); err != nil {
+			return nil, fmt.Errorf("failed to recompute %s: %w", nodeID, err)
+		}
+
+		ds.CurrentVersion.CacheValid = true
+		for _, dep := range ds.CurrentVersion.Dependencies {
+			depDs, err := k.registry.Get(dep)
+			if err == nil {
+				if ds.CurrentVersion.DependencyVersions == nil {
+					ds.CurrentVersion.DependencyVersions = make(map[string]int)
+				}
+				ds.CurrentVersion.DependencyVersions[dep] = depDs.CurrentVersion.Version
+			}
+		}
+		if err := k.registry.Update(ds); err != nil {
+			return nil, err
+		}
+
+		if err := k.graph.UpdateNode(k.makeGraphNode(ds)); err != nil {
+			return nil, err
+		}
+
+		k.cache.MarkValid(nodeID)
+	}
+
+	k.traceEvent("recompute", name, fmt.Sprintf("affected=%d", len(plan)))
+	return &RecomputeResult{Recomputed: recomputed, Skipped: skipped}, nil
+}
+
+func (k *Kernel) buildRecomputePlan(root string, affected []string) ([]string, error) {
+	planSet := make(map[string]struct{}, len(affected)+1)
+	planSet[root] = struct{}{}
+
+	k.collectUpstream(root, planSet)
+
+	for _, a := range affected {
+		planSet[a] = struct{}{}
+		for _, n := range k.graph.GetDownstream(a) {
+			planSet[n.ID] = struct{}{}
+			k.collectUpstream(n.ID, planSet)
+		}
+	}
+
+	ids := make([]string, 0, len(planSet))
+	for id := range planSet {
+		ids = append(ids, id)
+	}
+
+	order, err := traversal.TopologicalSort(ids, k.getEdges())
+	if err != nil {
+		return nil, err
+	}
+
+	return order, nil
+}
+
+func (k *Kernel) collectUpstream(nodeID string, planSet map[string]struct{}) {
+	node, err := k.graph.GetNode(nodeID)
+	if err != nil {
+		return
+	}
+	latest := node.Latest()
+	if latest == nil {
+		return
+	}
+	for _, dep := range latest.Dependencies {
+		if _, exists := planSet[dep]; !exists {
+			planSet[dep] = struct{}{}
+			k.collectUpstream(dep, planSet)
+		}
+	}
+}
+
+func (k *Kernel) getEdges() map[string]map[string]struct{} {
+	type dagStore struct {
+		edges   map[string]map[string]struct{}
+		reverse map[string]map[string]struct{}
+	}
+	if ds, ok := interface{}(k.graph).(interface {
+		GetEdges() map[string]map[string]struct{}
+	}); ok {
+		return ds.GetEdges()
+	}
+	return make(map[string]map[string]struct{})
 }
 
 func (k *Kernel) Drop(name string) error {
@@ -215,6 +417,47 @@ func (k *Kernel) Drop(name string) error {
 	k.cache.Invalidate(name)
 	k.traceEvent("drop", name, "")
 	return nil
+}
+
+func (k *Kernel) EnsureFresh(name string) (*RecomputeResult, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+
+	ds, err := k.registry.Get(name)
+	if err != nil {
+		return nil, err
+	}
+
+	if ds.CurrentVersion.CacheValid {
+		return nil, nil
+	}
+
+	k.logger.Printf("dataset %s is dirty, auto-recomputing...", name)
+	return k.recomputeInternal(name)
+}
+
+func (k *Kernel) IsDirty(name string) bool {
+	ds, err := k.registry.Get(name)
+	if err != nil {
+		return false
+	}
+	return !ds.CurrentVersion.CacheValid
+}
+
+func (k *Kernel) invalidateDownstream(name string) {
+	downstream := k.graph.GetDownstream(name)
+	for _, n := range downstream {
+		ds, err := k.registry.Get(n.ID)
+		if err != nil {
+			continue
+		}
+		ds.CurrentVersion.CacheValid = false
+		if err := k.registry.Update(ds); err != nil {
+			continue
+		}
+		k.cache.Invalidate(n.ID)
+		k.graph.Invalidate(n.ID)
+	}
 }
 
 func (k *Kernel) makeGraphNode(ds *dataset.Dataset) node.Node {

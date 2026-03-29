@@ -28,6 +28,7 @@ type DAG interface {
 	RecomputePlan(id string) ([]node.Node, error)
 	DetectCycle(from, to string) (bool, []string)
 	RenderASCII() string
+	GetEdges() map[string]map[string]struct{}
 }
 
 type dagStore struct {
@@ -67,14 +68,13 @@ func (d *dagStore) AddNode(n node.Node) error {
 	if version == nil {
 		return fmt.Errorf("node must have at least one version")
 	}
-	if err := d.validateDependencies(version.Dependencies); err != nil {
-		return err
-	}
-	if err := d.addDependencies(n.ID, nil, version.Dependencies); err != nil {
-		return err
-	}
 
 	d.nodes[n.ID] = copyNode(&n)
+
+	if err := d.addDependencies(n.ID, nil, version.Dependencies); err != nil {
+		d.logEvent("deps_deferred", n.ID, fmt.Sprintf("deps=%v", version.Dependencies))
+	}
+
 	d.logEvent("node_added", n.ID, n.Name)
 	return nil
 }
@@ -505,4 +505,10 @@ func (d *dagStore) logEvent(event, subject, detail string) {
 	if d.debug {
 		d.logger.Printf("event=%s subject=%s detail=%s", event, subject, detail)
 	}
+}
+
+func (d *dagStore) GetEdges() map[string]map[string]struct{} {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.edges
 }
