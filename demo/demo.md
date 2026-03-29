@@ -10,6 +10,24 @@ bash demo/demo.sh
 
 ---
 
+## State Model (Truth Layer)
+
+These are the core “laws of physics” behind the demo:
+
+1. **Source datasets are versioned state**  
+   `create` / `transform` writes a new dataset version and updates the authoritative view for that dataset name.
+2. **Derived datasets are cached materializations of versioned SQL**  
+   They are valid only while recorded dependency versions still match.
+3. **Invalidation is automatic; recomputation is selective**  
+   Upstream writes invalidate downstream dependents immediately, but downstream recompute happens when you explicitly `recompute` (or when `run` needs freshness for the requested target).
+4. **`run` and `recompute` are different operations**  
+   - `run <x>`: ensure `x` is fresh using upstream traversal only, then read it.  
+   - `recompute <x>`: force recompute of requested `x`, then selectively rebuild invalidated downstream dependents.
+5. **Graph scope is static over registered dataset names**  
+   Dependency extraction is static SQL lineage over known DuckKernel datasets.
+
+---
+
 ## Step 0: Build + reset demo DB
 
 **What:** Build fresh binary and reset demo database.
@@ -79,6 +97,8 @@ users
 **What:** Compare ad-hoc SQL (`query`) with dependency-aware execution (`run`).
 
 **Value:** `run` now explicitly reports both executed and skipped nodes.
+
+**Important distinction:** `query` never changes cache state. `run` may trigger recomputation if required for freshness of the requested dataset.
 
 ```bash
 $ /workspace/duckkernel/bin/duckkernel --db /tmp/duckkernel_demo.db query "SELECT * FROM enriched"
@@ -193,13 +213,15 @@ users
 
 **Value:** Makes semantics explicit:
 - requested target is recomputed,
-- downstream affected dataset recomputes,
+- invalidated dependents recompute,
 - unchanged inputs are reused.
 
 ```bash
 $ /workspace/duckkernel/bin/duckkernel --db /tmp/duckkernel_demo.db transform large_orders "SELECT i as order_id, ((i-1) % 100) + 1 as user_id, CASE WHEN ((i-1) % 100) + 1 <= 5 THEN (i * 10.5 + 5) * 2 ELSE (i * 10.5 + 5) END as amount FROM range(1, 501) t(i)"
 dataset=large_orders version=2 mode=cached
 ```
+
+At this point, **authoritative state changed** for `large_orders`, while dependent cached datasets (`analytics`, `analytics_top`) are invalidated and can still be read stale until recomputed:
 
 ```bash
 $ /workspace/duckkernel/bin/duckkernel --db /tmp/duckkernel_demo.db query "SELECT * FROM analytics ORDER BY total_spent DESC LIMIT 10"
@@ -221,6 +243,8 @@ $ /workspace/duckkernel/bin/duckkernel --db /tmp/duckkernel_demo.db query "SELEC
 (10 rows)
 ```
 
+DuckKernel then reports recompute classes explicitly:
+
 ```bash
 $ /workspace/duckkernel/bin/duckkernel --db /tmp/duckkernel_demo.db recompute analytics
 recompute plan:
@@ -232,6 +256,11 @@ recompute plan:
     - large_orders
     - large_users
 ```
+
+Structural classes in that plan:
+- **requested node**: `analytics`
+- **invalidated dependent nodes**: `analytics_top`
+- **unaffected cached nodes**: `large_orders`, `large_users`
 
 ```bash
 $ /workspace/duckkernel/bin/duckkernel --db /tmp/duckkernel_demo.db query "SELECT * FROM analytics ORDER BY total_spent DESC LIMIT 10"
@@ -398,7 +427,11 @@ large_orders (version=2 mode=cached)
 
 ## Semantics notes (explicit)
 
-- `run <dataset>`: plans upstream dependencies only; executes dirty/out-of-date nodes; prints executed vs cached.
-- `recompute <dataset>`: always recomputes requested dataset, propagates to downstream dependents if needed, and prints requested vs dependency-triggered vs cached.
-- Invalidation: `create/transform` updates version and invalidates downstream caches.
+- `run <dataset>`: plans upstream dependencies only; executes dirty/out-of-date nodes; prints executed vs cached; does not proactively rebuild unrelated downstream nodes.
+- `recompute <dataset>`: always recomputes requested dataset, then selectively rebuilds invalidated dependents, and reports requested/invalidated-dependent/unaffected-cached classes.
+- Invalidation: `create/transform` updates authoritative dataset version and invalidates downstream cached derived datasets.
 - Assumption: dependency extraction is static/closed-world SQL over known registered dataset names; dynamic SQL/external runtime-resolved sources may not be fully tracked.
+
+### Limitation moment (intentional)
+
+The demo graph is clean because all transforms reference registered dataset names directly. If a workflow uses dynamic SQL or late-bound external relations, dependency edges may be incomplete, and recompute propagation may miss those runtime-only dependencies.
