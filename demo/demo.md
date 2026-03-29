@@ -12,19 +12,29 @@ bash demo/demo.sh
 
 ## State Model (Truth Layer)
 
-These are the core “laws of physics” behind the demo:
+These are the core invariants behind the system.
 
-1. **Source datasets are versioned state**  
-   `create` / `transform` writes a new dataset version and updates the authoritative view for that dataset name.
-2. **Derived datasets are cached materializations of versioned SQL**  
-   They are valid only while recorded dependency versions still match.
-3. **Invalidation is automatic; recomputation is selective**  
-   Upstream writes invalidate downstream dependents immediately, but downstream recompute happens when you explicitly `recompute` (or when `run` needs freshness for the requested target).
-4. **`run` and `recompute` are different operations**  
-   - `run <x>`: ensure `x` is fresh using upstream traversal only, then read it.  
-   - `recompute <x>`: force recompute of requested `x`, then selectively rebuild invalidated downstream dependents.
-5. **Graph scope is static over registered dataset names**  
-   Dependency extraction is static SQL lineage over known DuckKernel datasets.
+### System invariants
+
+1. **Version monotonicity**
+   Every `create` / `transform` produces a strictly increasing dataset version per dataset name.
+
+2. **Materialization validity rule**
+   A cached dataset version is valid iff all upstream dependency versions match those recorded at materialization time.
+
+3. **Invalidation rule (eventual consistency boundary)**
+   Any upstream `create` or `transform` immediately marks all downstream dependents as *invalid*, without recomputing them.
+
+4. **Recompute closure rule**
+   `recompute(x)` executes a transitive closure over the dependency graph rooted at `x`, restricted to invalidated nodes, and executes them in topological order.
+
+5. **run vs recompute separation**
+
+   * `run(x)` = read-through execution ensuring freshness of `x` via upstream traversal only
+   * `recompute(x)` = forced rebuild of `x` plus invalidated downstream closure
+
+6. **Graph scope assumption**
+   Dependency extraction is static over registered dataset names in SQL (closed-world model).
 
 ---
 
@@ -54,17 +64,20 @@ $ /workspace/duckkernel/bin/duckkernel --db /tmp/duckkernel_demo.db create order
 dataset=orders version=1 mode=cached
 ```
 
-### `run <dataset>`
-- Traverses **upstream dependencies** needed to read `<dataset>`.
-- Does **not** traverse downstream datasets.
-- Recomputes only nodes that are dirty/out-of-date; reuses cached nodes.
-- Prints an execution plan with both `executing` and `skipping (cached)` groups.
+### Execution rule: run(x)
+
+* Traverses upstream dependency graph only
+* Executes only invalidated or missing nodes
+* Reuses cached valid nodes
+* Never executes downstream nodes unless explicitly required by dependency traversal
+
+---
 
 ## Step 2: Build derived datasets
 
 **What:** Create `active_users` and `enriched` from existing datasets.
 
-**Value:** Demonstrates stateful transforms with captured lineage.
+**Value:** Demonstrates lineage-captured transforms.
 
 ```bash
 $ /workspace/duckkernel/bin/duckkernel --db /tmp/duckkernel_demo.db transform active_users "SELECT * FROM users WHERE active = true"
@@ -78,9 +91,9 @@ dataset=enriched version=1 mode=cached
 
 ## Step 3: Show lineage graph
 
-**What:** Print DAG edges.
+**What:** Print dependency DAG.
 
-**Value:** Makes dependency structure inspectable.
+**Value:** Makes system structure explicit.
 
 ```bash
 $ /workspace/duckkernel/bin/duckkernel --db /tmp/duckkernel_demo.db graph
@@ -92,13 +105,11 @@ users
 
 ---
 
-## Step 4: `query` vs `run`
+## Step 4: query vs run
 
-**What:** Compare ad-hoc SQL (`query`) with dependency-aware execution (`run`).
+**What:** Compare raw SQL execution vs dependency-aware execution.
 
-**Value:** `run` now explicitly reports both executed and skipped nodes.
-
-**Important distinction:** `query` never changes cache state. `run` may trigger recomputation if required for freshness of the requested dataset.
+**Value:** Establishes separation between ad-hoc execution and cached graph execution.
 
 ```bash
 $ /workspace/duckkernel/bin/duckkernel --db /tmp/duckkernel_demo.db query "SELECT * FROM enriched"
@@ -140,9 +151,9 @@ execution plan:
 
 ## Step 5: Build larger pipeline
 
-**What:** Create `large_users`, `large_orders`, `analytics`, and downstream `analytics_top`.
+**What:** Create multi-layer analytics pipeline.
 
-**Value:** Sets up a realistic recompute scenario where downstream propagation is visible.
+**Value:** Enables recompute propagation demonstration.
 
 ```bash
 $ /workspace/duckkernel/bin/duckkernel --db /tmp/duckkernel_demo.db create large_users "SELECT i as id, 'user_' || i as name, CASE WHEN i % 2 = 0 THEN true ELSE false END as active FROM range(1, 101) t(i)"
@@ -207,43 +218,21 @@ users
 
 ---
 
-## Step 6: Recompute moment (explicit plan)
+## Step 6: recompute moment
 
-**What:** Mutate upstream `large_orders`, inspect stale result, then recompute `analytics`.
+**What:** Mutate upstream dataset and observe recompute propagation.
 
-**Value:** Makes semantics explicit:
-- requested target is recomputed,
-- invalidated dependents recompute,
-- unchanged inputs are reused.
+**Value:** Demonstrates invalidation + selective rebuild semantics.
 
 ```bash
 $ /workspace/duckkernel/bin/duckkernel --db /tmp/duckkernel_demo.db transform large_orders "SELECT i as order_id, ((i-1) % 100) + 1 as user_id, CASE WHEN ((i-1) % 100) + 1 <= 5 THEN (i * 10.5 + 5) * 2 ELSE (i * 10.5 + 5) END as amount FROM range(1, 501) t(i)"
 dataset=large_orders version=2 mode=cached
 ```
 
-At this point, **authoritative state changed** for `large_orders`, while dependent cached datasets (`analytics`, `analytics_top`) are invalidated and can still be read stale until recomputed:
-
 ```bash
 $ /workspace/duckkernel/bin/duckkernel --db /tmp/duckkernel_demo.db query "SELECT * FROM analytics ORDER BY total_spent DESC LIMIT 10"
-+-----+----------+--------+-------------+-------------+
-| id  | name     | active | order_count | total_spent |
-+-----+----------+--------+-------------+-------------+
-| 100 | user_100 | true   | 5           | 15775       |
-| 99  | user_99  | false  | 5           | 15722.5     |
-| 98  | user_98  | true   | 5           | 15670       |
-| 97  | user_97  | false  | 5           | 15617.5     |
-| 96  | user_96  | true   | 5           | 15565       |
-| 95  | user_95  | false  | 5           | 15512.5     |
-| 94  | user_94  | true   | 5           | 15460       |
-| 93  | user_93  | false  | 5           | 15407.5     |
-| 92  | user_92  | true   | 5           | 15355       |
-| 91  | user_91  | false  | 5           | 15302.5     |
-+-----+----------+--------+-------------+-------------+
-
-(10 rows)
+...
 ```
-
-DuckKernel then reports recompute classes explicitly:
 
 ```bash
 $ /workspace/duckkernel/bin/duckkernel --db /tmp/duckkernel_demo.db recompute analytics
@@ -257,155 +246,74 @@ recompute plan:
     - large_users
 ```
 
-Structural classes in that plan:
-- **requested node**: `analytics`
-- **invalidated dependent nodes**: `analytics_top`
-- **unaffected cached nodes**: `large_orders`, `large_users`
-
 ```bash
 $ /workspace/duckkernel/bin/duckkernel --db /tmp/duckkernel_demo.db query "SELECT * FROM analytics ORDER BY total_spent DESC LIMIT 10"
-+-----+----------+--------+-------------+-------------+
-| id  | name     | active | order_count | total_spent |
-+-----+----------+--------+-------------+-------------+
-| 5   | user_5   | false  | 5           | 21575       |
-| 4   | user_4   | true   | 5           | 21470       |
-| 3   | user_3   | false  | 5           | 21365       |
-| 2   | user_2   | true   | 5           | 21260       |
-| 1   | user_1   | false  | 5           | 21155       |
-| 100 | user_100 | true   | 5           | 15775       |
-| 99  | user_99  | false  | 5           | 15722.5     |
-| 98  | user_98  | true   | 5           | 15670       |
-| 97  | user_97  | false  | 5           | 15617.5     |
-| 96  | user_96  | true   | 5           | 15565       |
-+-----+----------+--------+-------------+-------------+
-
-(10 rows)
+...
 ```
 
 ```bash
 $ /workspace/duckkernel/bin/duckkernel --db /tmp/duckkernel_demo.db query "SELECT * FROM analytics_top"
-+----+--------+-------------+
-| id | name   | total_spent |
-+----+--------+-------------+
-| 5  | user_5 | 21575       |
-| 4  | user_4 | 21470       |
-| 3  | user_3 | 21365       |
-| 2  | user_2 | 21260       |
-| 1  | user_1 | 21155       |
-+----+--------+-------------+
-
-(5 rows)
+...
 ```
 
-### 4) Recompute payoff with clear structural meaning
+---
 
-## Step 7: Streaming preview
+## Step 7: streaming preview
 
-**What:** Preview `active_users` stream.
-
-**Value:** Lightweight inspection path.
+**What:** Lightweight inspection of dataset.
 
 ```bash
 $ /workspace/duckkernel/bin/duckkernel --db /tmp/duckkernel_demo.db preview active_users
-+----+-------+--------+
-| id | name  | active |
-+----+-------+--------+
-| 1  | Alice | true   |
-| 2  | Bob   | true   |
-+----+-------+--------+
-
-(2 rows streamed)
+...
 ```
 
 ---
 
-## Step 8: Output formats
+## Step 8: output formats
 
-**What:** Render results as JSON and Markdown.
-
-**Value:** CLI output is pipeline/doc friendly.
+**What:** Demonstrate format switching.
 
 ```bash
 $ /workspace/duckkernel/bin/duckkernel --db /tmp/duckkernel_demo.db --format json query "SELECT * FROM users LIMIT 2"
-{"id": 1, "name": "Alice", "active": true}
-{"name": "Bob", "active": true, "id": 2}
-
-(2 rows)
+...
 
 $ /workspace/duckkernel/bin/duckkernel --db /tmp/duckkernel_demo.db --format markdown query "SELECT * FROM users LIMIT 2"
-| id | name | active |
-| --- | --- | --- |
-| 1 | Alice | true |
-| 2 | Bob | true |
-
-(2 rows)
+...
 ```
 
 ---
 
-## Step 9: REPL continuity across sessions
+## Step 9: REPL continuity
 
-**What:** Start two separate REPL invocations, both using existing persisted datasets.
-
-**Value:** Demonstrates continuity (no redefinition/rebuild mental overhead).
+**What:** Demonstrates persistence across sessions.
 
 ```bash
 $ echo 'SELECT * FROM analytics_top' | /workspace/duckkernel/bin/duckkernel --db /tmp/duckkernel_demo.db repl
-DuckKernel REPL v0.1 (type 'help' for commands, 'exit' to quit)
--------------------------------------------
-> +----+--------+-------------+
-| id | name   | total_spent |
-+----+--------+-------------+
-| 5  | user_5 | 21575       |
-| 4  | user_4 | 21470       |
-| 3  | user_3 | 21365       |
-| 2  | user_2 | 21260       |
-| 1  | user_1 | 21155       |
-+----+--------+-------------+
-
-(5 rows)
->
+...
 
 $ echo 'SELECT COUNT(*) as top_rows, MIN(total_spent) as floor_spend FROM analytics_top;' | /workspace/duckkernel/bin/duckkernel --db /tmp/duckkernel_demo.db repl
-DuckKernel REPL v0.1 (type 'help' for commands, 'exit' to quit)
--------------------------------------------
-> +----------+-------------+
-| top_rows | floor_spend |
-+----------+-------------+
-| 5        | 21155       |
-+----------+-------------+
-
-(1 rows)
->
+...
 ```
 
 ---
 
-## Step 10: Error handling
+## Step 10: error handling
 
-**What:** Show invalid SQL and invalid dataset-name failure paths.
-
-**Value:** Confirms failure surfaces are explicit.
+**What:** Invalid query + invalid dataset name.
 
 ```bash
 $ /workspace/duckkernel/bin/duckkernel --db /tmp/duckkernel_demo.db query "SELECT * FROM nonexistent"
-2026/03/29 14:39:20 fatal: stream query failed: Catalog Error: Table with name nonexistent does not exist!
-Did you mean "pg_constraint"?
-
-LINE 1: SELECT * FROM nonexistent
-                      ^
+...
 
 $ /workspace/duckkernel/bin/duckkernel --db /tmp/duckkernel_demo.db create "invalid-name" "SELECT 1"
-2026/03/29 14:39:20 fatal: invalid dataset name: invalid-name
+...
 ```
 
 ---
 
-## Step 11: Cleanup
+## Step 11: cleanup
 
-**What:** Drop `analytics` and `analytics_top`.
-
-**Value:** Leaves reusable demo DB in known state.
+**What:** Remove derived datasets.
 
 ```bash
 $ /workspace/duckkernel/bin/duckkernel --db /tmp/duckkernel_demo.db drop analytics
@@ -425,13 +333,15 @@ large_orders (version=2 mode=cached)
 
 ---
 
-## Semantics notes (explicit)
+## Semantics summary
 
-- `run <dataset>`: plans upstream dependencies only; executes dirty/out-of-date nodes; prints executed vs cached; does not proactively rebuild unrelated downstream nodes.
-- `recompute <dataset>`: always recomputes requested dataset, then selectively rebuilds invalidated dependents, and reports requested/invalidated-dependent/unaffected-cached classes.
-- Invalidation: `create/transform` updates authoritative dataset version and invalidates downstream cached derived datasets.
-- Assumption: dependency extraction is static/closed-world SQL over known registered dataset names; dynamic SQL/external runtime-resolved sources may not be fully tracked.
+* `run(x)` performs read-through execution using upstream traversal only.
+* `recompute(x)` performs forced recomputation and downstream invalidated closure.
+* `transform/create` increments dataset version and invalidates downstream dependents immediately.
+* Cache validity depends strictly on version alignment with recorded upstream dependencies.
 
-### Limitation moment (intentional)
+---
 
-The demo graph is clean because all transforms reference registered dataset names directly. If a workflow uses dynamic SQL or late-bound external relations, dependency edges may be incomplete, and recompute propagation may miss those runtime-only dependencies.
+## Limitation note
+
+This system assumes static SQL lineage resolution over known dataset names. Dynamic SQL or runtime-resolved dependencies may not be captured in the dependency graph, leading to incomplete recompute propagation.
