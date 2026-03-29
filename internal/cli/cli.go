@@ -218,8 +218,8 @@ func runQuery(dbPath string, logger *log.Logger, debug bool, sqlText string, out
 		return err
 	}
 
-	tbl := format.NewTableFormatter(os.Stdout)
-	tbl.SetHeader(cols)
+	fmtr := getFormatter(outFormat)
+	fmtr.SetHeader(cols)
 
 	rowCount := 0
 	limit := 1000
@@ -232,7 +232,7 @@ func runQuery(dbPath string, logger *log.Logger, debug bool, sqlText string, out
 		for i, col := range cols {
 			row[i] = record[col]
 		}
-		tbl.AppendRow(row)
+		fmtr.AppendRow(row)
 		rowCount++
 	}
 
@@ -240,7 +240,7 @@ func runQuery(dbPath string, logger *log.Logger, debug bool, sqlText string, out
 		return err
 	}
 
-	tbl.Render()
+	fmtr.Render()
 	fmt.Fprintf(os.Stdout, "\n(%d rows)\n", rowCount)
 	return nil
 }
@@ -264,8 +264,8 @@ func runPreview(dbPath string, logger *log.Logger, debug bool, name string, outF
 		return err
 	}
 
-	tbl := format.NewTableFormatter(os.Stdout)
-	tbl.SetHeader(cols)
+	fmtr := getFormatter(outFormat)
+	fmtr.SetHeader(cols)
 
 	rowCount := 0
 	for stream.Next() {
@@ -277,7 +277,7 @@ func runPreview(dbPath string, logger *log.Logger, debug bool, name string, outF
 		for i, col := range cols {
 			row[i] = record[col]
 		}
-		tbl.AppendRow(row)
+		fmtr.AppendRow(row)
 		rowCount++
 
 		if rowCount%1000 == 0 {
@@ -289,7 +289,7 @@ func runPreview(dbPath string, logger *log.Logger, debug bool, name string, outF
 		return err
 	}
 
-	tbl.Render()
+	fmtr.Render()
 	fmt.Fprintf(os.Stdout, "\n(%d rows streamed)\n", rowCount)
 	return nil
 }
@@ -320,6 +320,17 @@ func parseFormat(s string) OutputFormat {
 		return FormatMarkdown
 	default:
 		return FormatTable
+	}
+}
+
+func getFormatter(outFormat OutputFormat) format.Formatter {
+	switch outFormat {
+	case FormatJSON:
+		return format.NewJSONFormatter(os.Stdout)
+	case FormatMarkdown:
+		return format.NewMarkdownFormatter(os.Stdout)
+	default:
+		return format.NewTableFormatter(os.Stdout)
 	}
 }
 

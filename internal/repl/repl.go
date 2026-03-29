@@ -363,15 +363,73 @@ func (c *runtimeClient) PreviewDataset(name string) (stream.RecordStream, error)
 }
 
 func (c *runtimeClient) GetGraph() string {
-	return ""
+	ctx := context.Background()
+	stream, err := c.rt.ExecuteSQL(ctx, "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main' AND table_name LIKE 'dk_%'")
+	if err != nil {
+		return ""
+	}
+	defer stream.Close()
+
+	var nodes []string
+	cols, _ := stream.Columns()
+	if len(cols) > 0 {
+		for stream.Next() {
+			record := stream.Record()
+			if name, ok := record["table_name"]; ok {
+				if s, ok := name.(string); ok {
+					nodes = append(nodes, s)
+				}
+			}
+		}
+	}
+
+	if len(nodes) == 0 {
+		return "(empty graph)"
+	}
+
+	result := "Datasets:\n"
+	for _, n := range nodes {
+		result += "  " + n + "\n"
+	}
+	return result
 }
 
 func (c *runtimeClient) GetDataset(name string) (string, error) {
-	return "", nil
+	ctx := context.Background()
+	stream, err := c.rt.ExecuteSQL(ctx, fmt.Sprintf("SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = 'main' AND table_name = '%s'", name))
+	if err != nil {
+		return "", err
+	}
+	defer stream.Close()
+
+	cols, _ := stream.Columns()
+	if len(cols) > 0 && stream.Next() {
+		return fmt.Sprintf("name: %s", name), nil
+	}
+	return "", fmt.Errorf("dataset not found: %s", name)
 }
 
 func (c *runtimeClient) ListDatasets() []string {
-	return []string{}
+	ctx := context.Background()
+	stream, err := c.rt.ExecuteSQL(ctx, "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main' AND table_name LIKE 'dk_%'")
+	if err != nil {
+		return []string{}
+	}
+	defer stream.Close()
+
+	var datasets []string
+	cols, _ := stream.Columns()
+	if len(cols) > 0 {
+		for stream.Next() {
+			record := stream.Record()
+			if name, ok := record["table_name"]; ok {
+				if s, ok := name.(string); ok {
+					datasets = append(datasets, s)
+				}
+			}
+		}
+	}
+	return datasets
 }
 
 func (c *runtimeClient) DropDataset(name string) error {

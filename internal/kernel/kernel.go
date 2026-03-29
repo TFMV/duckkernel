@@ -17,7 +17,7 @@ import (
 
 type Kernel struct {
 	exec     executor.Executor
-	registry *dataset.InMemoryRegistry
+	registry dataset.Registry
 	graph    dag.DAG
 	cache    *cache.Manager
 	logger   *log.Logger
@@ -30,14 +30,40 @@ func New(dbPath string, logger *log.Logger, debug bool) (*Kernel, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Kernel{
+	var registry dataset.Registry
+	if dbPath == ":memory:" {
+		registry = dataset.NewRegistry()
+	} else {
+		registry = dataset.NewPersistentRegistry(exec.GetDB())
+		if err := registry.Load(); err != nil {
+			return nil, fmt.Errorf("failed to load registry: %w", err)
+		}
+	}
+	k := &Kernel{
 		exec:     exec,
-		registry: dataset.NewRegistry(),
+		registry: registry,
 		graph:    dag.New(logger, debug),
 		cache:    cache.NewManager(),
 		logger:   logger,
 		debug:    debug,
-	}, nil
+	}
+	if err := k.rebuildGraph(); err != nil {
+		return nil, fmt.Errorf("failed to rebuild graph: %w", err)
+	}
+	return k, nil
+}
+
+func (k *Kernel) rebuildGraph() error {
+	datasets := k.registry.List()
+	for _, ds := range datasets {
+		if err := k.graph.AddNode(k.makeGraphNode(ds)); err != nil {
+			if k.debug {
+				k.logger.Printf("debug: node already exists: %s", ds.Name)
+			}
+		}
+		k.cache.MarkValid(ds.Name)
+	}
+	return nil
 }
 
 func (k *Kernel) Close() error {
