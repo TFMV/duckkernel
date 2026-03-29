@@ -98,3 +98,7 @@ func (e *DuckDBExecutor) DropRelation(name string) error {
 func (e *DuckDBExecutor) Close() error {
 	return e.db.Close()
 }
+
+func (e *DuckDBExecutor) GetDB() *sql.DB {
+	return e.db
+}

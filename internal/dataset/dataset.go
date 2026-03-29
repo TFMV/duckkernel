@@ -40,6 +40,7 @@ type Registry interface {
 	Update(dataset *Dataset) error
 	Remove(name string) error
 	Names() []string
+	Load() error
 }
 
 type InMemoryRegistry struct {
@@ -49,6 +50,10 @@ type InMemoryRegistry struct {
 
 func NewRegistry() *InMemoryRegistry {
 	return &InMemoryRegistry{datasets: make(map[string]*Dataset)}
+}
+
+func (r *InMemoryRegistry) Load() error {
+	return nil
 }
 
 func (r *InMemoryRegistry) Add(dataset *Dataset) error {

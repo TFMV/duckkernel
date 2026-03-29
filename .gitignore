@@ -19,7 +19,8 @@ profile.cov
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
-
+bin/
+duckkernel_demo.db
 # Go workspace file
 go.work
 go.work.sum

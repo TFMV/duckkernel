@@ -9,6 +9,12 @@ import (
 	"time"
 )
 
+type Formatter interface {
+	SetHeader(headers []string)
+	AppendRow(row []interface{})
+	Render()
+}
+
 type TableFormatter struct {
 	out     io.Writer
 	headers []string
@@ -122,20 +128,40 @@ func formatValue(v interface{}) string {
 }
 
 type JSONFormatter struct {
-	out io.Writer
+	out     io.Writer
+	headers []string
+	rows    [][]interface{}
 }
 
 func NewJSONFormatter(out io.Writer) *JSONFormatter {
 	return &JSONFormatter{out: out}
 }
 
-func (j *JSONFormatter) Write(data interface{}) error {
-	str, err := toJSON(data)
-	if err != nil {
-		return err
+func (j *JSONFormatter) SetHeader(headers []string) {
+	j.headers = headers
+}
+
+func (j *JSONFormatter) AppendRow(row []interface{}) {
+	j.rows = append(j.rows, row)
+}
+
+func (j *JSONFormatter) Render() {
+	if len(j.headers) == 0 {
+		return
 	}
-	_, err = j.out.Write([]byte(str))
-	return err
+	for _, row := range j.rows {
+		obj := make(map[string]interface{})
+		for i, h := range j.headers {
+			if i < len(row) {
+				obj[h] = row[i]
+			}
+		}
+		str, err := toJSON(obj)
+		if err != nil {
+			continue
+		}
+		fmt.Fprintln(j.out, str)
+	}
 }
 
 func toJSON(v interface{}) (string, error) {
@@ -190,33 +216,43 @@ func toJSON(v interface{}) (string, error) {
 }
 
 type MarkdownFormatter struct {
-	out io.Writer
+	out     io.Writer
+	headers []string
+	rows    [][]interface{}
 }
 
 func NewMarkdownFormatter(out io.Writer) *MarkdownFormatter {
 	return &MarkdownFormatter{out: out}
 }
 
-func (m *MarkdownFormatter) Write(headers []string, rows [][]interface{}) {
-	if len(headers) == 0 {
+func (m *MarkdownFormatter) SetHeader(headers []string) {
+	m.headers = headers
+}
+
+func (m *MarkdownFormatter) AppendRow(row []interface{}) {
+	m.rows = append(m.rows, row)
+}
+
+func (m *MarkdownFormatter) Render() {
+	if len(m.headers) == 0 {
 		return
 	}
 
 	fmt.Fprintf(m.out, "|")
-	for _, h := range headers {
+	for _, h := range m.headers {
 		fmt.Fprintf(m.out, " %s |", h)
 	}
 	fmt.Fprintln(m.out)
 
 	fmt.Fprintf(m.out, "|")
-	for range headers {
+	for range m.headers {
 		fmt.Fprintf(m.out, " --- |")
 	}
 	fmt.Fprintln(m.out)
 
-	for _, row := range rows {
+	for _, row := range m.rows {
 		fmt.Fprintf(m.out, "|")
-		for i := range headers {
+		for i := range m.headers {
 			if i < len(row) {
 				fmt.Fprintf(m.out, " %s |", formatValue(row[i]))
 			} else {
