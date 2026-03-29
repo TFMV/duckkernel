@@ -54,7 +54,11 @@ $ /workspace/duckkernel/bin/duckkernel --db /tmp/duckkernel_demo.db create order
 dataset=orders version=1 mode=cached
 ```
 
----
+### `run <dataset>`
+- Traverses **upstream dependencies** needed to read `<dataset>`.
+- Does **not** traverse downstream datasets.
+- Recomputes only nodes that are dirty/out-of-date; reuses cached nodes.
+- Prints an execution plan with both `executing` and `skipping (cached)` groups.
 
 ## Step 2: Build derived datasets
 
@@ -293,7 +297,7 @@ $ /workspace/duckkernel/bin/duckkernel --db /tmp/duckkernel_demo.db query "SELEC
 (5 rows)
 ```
 
----
+### 4) Recompute payoff with clear structural meaning
 
 ## Step 7: Streaming preview
 
